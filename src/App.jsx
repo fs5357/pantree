@@ -218,29 +218,64 @@ function useEngine(items, recipes, swaps) {
       return null;
     };
 
+    // map each normalized recipe name to its recipe, so an ingredient can be
+    // satisfied by COOKING a same-named recipe (e.g. an ingredient "Pickled
+    // Onions" can be made by a recipe also called "Pickled Onions").
+    const recipeByName = new Map();
+    recipes.forEach((r) => recipeByName.set(norm(r.name), r));
+
+    // Can `name` be made from a same-named recipe whose own required
+    // ingredients are all on hand (in stock, swappable, an assumed staple, or
+    // themselves makeable)? Returns that recipe, or null. `stack` guards cycles
+    // so two recipes that reference each other can't loop forever.
+    const makeableFor = (name, stack) => {
+      const sub = recipeByName.get(norm(name));
+      if (!sub || stack.has(norm(name))) return null;
+      const next = new Set(stack);
+      next.add(norm(name));
+      const ok = sub.ingredients.every((ing) => {
+        if (ing.optional) return true;
+        const st = stockOf(ing.name);
+        if (st === "in" || st === "low") return true; // physically on hand
+        if (st === "untracked") return true;          // assumed-on-hand staple
+        if (subFor(ing.name)) return true;            // an in-stock substitute
+        return !!makeableFor(ing.name, next);         // or make it too
+      });
+      return ok ? sub : null;
+    };
+
     const analyzed = recipes.map((r) => {
       const lines = r.ingredients.map((ing) => {
         const stock = stockOf(ing.name);
-        const have = present(ing.name);
-        const swap = have ? null : subFor(ing.name);
+        const inStock = stock === "in" || stock === "low";
         const untracked = stock === "untracked";
-        return { ...ing, stock, have, swap, untracked, missing: !have && !swap };
+        // a stand-in only applies to a tracked item that's actually out
+        const swap = stock === "out" ? subFor(ing.name) : null;
+        // otherwise, see if a same-named recipe can make it
+        const makeRecipe = !inStock && !swap ? makeableFor(ing.name, new Set([norm(r.name)])) : null;
+        // an untracked staple counts as on-hand UNLESS we're making it
+        const assumed = untracked && !makeRecipe;
+        const have = inStock || assumed;
+        const missing = !have && !swap && !makeRecipe;
+        return { ...ing, stock, have, swap, makeRecipe, untracked, missing };
       });
       const reqMissing = lines.filter((l) => !l.optional && l.missing);
-      const reqSwaps = lines.filter((l) => !l.optional && !l.have && l.swap);
+      const reqSwaps = lines.filter((l) => !l.optional && l.swap);
+      const reqMakes = lines.filter((l) => !l.optional && l.makeRecipe);
       const optMissing = lines.filter((l) => l.optional && l.missing);
 
       let status;
       if (reqMissing.length === 0) {
-        if (reqSwaps.length) status = "swap";
+        if (reqMakes.length) status = "make";
+        else if (reqSwaps.length) status = "swap";
         else if (optMissing.length) status = "ready_extras";
         else status = "ready";
       } else status = reqMissing.length === 1 ? "short_one" : "shop";
 
-      return { ...r, lines, status, reqMissing, reqSwaps, optMissing };
+      return { ...r, lines, status, reqMissing, reqSwaps, reqMakes, optMissing };
     });
 
-    return { byName, stockOf, present, subFor, analyzed };
+    return { byName, stockOf, present, subFor, makeableFor, analyzed };
   }, [items, recipes, swaps]);
 }
 
@@ -255,6 +290,7 @@ const CSS = `
   --fresh:#4F7A3C; --fresh-bg:#E3EFD6; --fresh-line:#C4DBB0;
   --amber:#A9711E; --amber-bg:#F6E6C8; --amber-line:#E6CD9C;
   --clay:#A8472C; --clay-bg:#F1DACE; --clay-line:#E1BCA9;
+  --make:#3B6470; --make-bg:#DDE9EC; --make-line:#B5CDD4;
 }
 *{box-sizing:border-box}
 .mise{font-family:'Hanken Grotesk',system-ui,sans-serif;color:var(--ink);
@@ -329,11 +365,14 @@ const CSS = `
 .add-swap{margin-left:auto;display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:700;
   text-transform:uppercase;letter-spacing:.04em;color:var(--amber);opacity:.55}
 .ing-row.swappable:hover .add-swap{opacity:1}
+.make-tag{margin-left:auto;display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--make)}
 .ing-list{margin-top:11px;border-top:1px dashed var(--line);padding-top:9px}
 .dot{width:8px;height:8px;border-radius:50%;flex:none}
 .d-in{background:var(--fresh)} .d-low{background:var(--amber)} .d-out{background:var(--clay)}
 .d-untracked{background:#C7C0AE}
 .swapnote{font-size:12.5px;color:var(--amber);background:var(--amber-bg);border:1px solid var(--amber-line);
+  border-radius:8px;padding:6px 9px;margin-top:11px;display:flex;gap:7px;align-items:flex-start}
+.makenote{font-size:12.5px;color:var(--make);background:var(--make-bg);border:1px solid var(--make-line);
   border-radius:8px;padding:6px 9px;margin-top:11px;display:flex;gap:7px;align-items:flex-start}
 .shortnote{font-size:12.5px;color:var(--clay);background:var(--clay-bg);border:1px solid var(--clay-line);
   border-radius:8px;padding:6px 9px;margin-top:11px;display:flex;gap:8px;align-items:center;justify-content:space-between}
@@ -344,6 +383,7 @@ const CSS = `
 .pill.inline{position:static}
 .p-ready{background:var(--fresh-bg);color:var(--fresh);border:1px solid var(--fresh-line)}
 .p-swap{background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber-line)}
+.p-make{background:var(--make-bg);color:var(--make);border:1px solid var(--make-line)}
 .p-short{background:var(--clay-bg);color:var(--clay);border:1px solid var(--clay-line)}
 
 /* summary strip */
@@ -473,11 +513,13 @@ const PILL = {
   ready: ["p-ready", "Ready"],
   ready_extras: ["p-ready", "Ready"],
   swap: ["p-swap", "With a swap"],
+  make: ["p-make", "Make ahead"],
   short_one: ["p-short", "1 short"],
   shop: ["p-short", "Needs a shop"],
 };
 const SPINE = {
   ready: "var(--fresh)", ready_extras: "var(--fresh)", swap: "var(--amber)",
+  make: "var(--make)",
   short_one: "var(--clay)", shop: "var(--clay)",
 };
 
@@ -492,7 +534,7 @@ function RecipeTicket({ r, onAddMissing, onCooked, onEdit, onSwapIngredient, onD
 
       <div className="ing-list">
         {r.lines.map((l) => {
-          const canSwap = l.stock === "out" && !!onSwapIngredient;
+          const canSwap = l.stock === "out" && !l.makeRecipe && !!onSwapIngredient;
           return (
             <div
               className={`ing-row ${canSwap ? "swappable" : ""}`}
@@ -505,6 +547,9 @@ function RecipeTicket({ r, onAddMissing, onCooked, onEdit, onSwapIngredient, onD
               <span className="nm">{l.name}</span>
               {l.optional && <span className="muted" style={{ fontSize: 11 }}>optional</span>}
               {l.swap && <span className="muted" style={{ fontSize: 11, marginLeft: "auto" }}>↳ {l.swap}</span>}
+              {!l.swap && l.makeRecipe && (
+                <span className="make-tag"><ChefHat size={11} /> make</span>
+              )}
               {canSwap && !l.swap && (
                 <span className="add-swap"><ArrowLeftRight size={12} /> swap</span>
               )}
@@ -520,6 +565,13 @@ function RecipeTicket({ r, onAddMissing, onCooked, onEdit, onSwapIngredient, onD
         </div>
       )}
 
+      {r.reqMakes.length > 0 && (
+        <div className="makenote">
+          <ChefHat size={14} style={{ marginTop: 1, flex: "none" }} />
+          <span>Make {r.reqMakes.map((l) => l.name).join(", ")} first — you have what {r.reqMakes.length > 1 ? "they need" : "it needs"}.</span>
+        </div>
+      )}
+
       {(r.status === "short_one" || r.status === "shop") && (
         <div className="shortnote">
           <span>Missing {r.reqMissing.map((l) => l.name).join(", ")}</span>
@@ -530,7 +582,7 @@ function RecipeTicket({ r, onAddMissing, onCooked, onEdit, onSwapIngredient, onD
       )}
 
       <div className="when">
-        {(r.status === "ready" || r.status === "ready_extras" || r.status === "swap") && (
+        {(r.status === "ready" || r.status === "ready_extras" || r.status === "swap" || r.status === "make") && (
           <button className="btn sm primary" onClick={() => onCooked(r)}>
             <ChefHat size={14} /> Made this
           </button>
@@ -555,12 +607,12 @@ function RecipeTicket({ r, onAddMissing, onCooked, onEdit, onSwapIngredient, onD
 /* -------------------------------- TODAY ----------------------------------- */
 function TodayView({ engine, ...h }) {
   const a = engine.analyzed;
-  const cookable = a.filter((r) => ["ready", "ready_extras", "swap"].includes(r.status));
+  const cookable = a.filter((r) => ["ready", "ready_extras", "swap", "make"].includes(r.status));
   const shortOne = a.filter((r) => r.status === "short_one");
   const bigShop = a.filter((r) => r.status === "shop");
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
-  const order = { ready: 0, ready_extras: 1, swap: 2 };
+  const order = { ready: 0, ready_extras: 1, swap: 2, make: 3 };
   cookable.sort((x, y) => order[x.status] - order[y.status] || x.name.localeCompare(y.name));
   shortOne.sort((x, y) => x.name.localeCompare(y.name));
   bigShop.sort((x, y) => x.name.localeCompare(y.name));
