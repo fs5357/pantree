@@ -582,11 +582,6 @@ function RecipeTicket({ r, onAddMissing, onCooked, onEdit, onSwapIngredient, onD
       )}
 
       <div className="when">
-        {(r.status === "ready" || r.status === "ready_extras" || r.status === "swap" || r.status === "make") && (
-          <button className="btn sm primary" onClick={() => onCooked(r)}>
-            <ChefHat size={14} /> Made this
-          </button>
-        )}
         <button className="btn sm ghost" onClick={() => onEdit(r)}>
           <Pencil size={13} /> Edit
         </button>
