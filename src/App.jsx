@@ -168,7 +168,7 @@ function buildSeed() {
     ingredients: ings.map(([n, q, u, opt]) => ({ id: uid(), name: n, qty: q, unit: u, optional: !!opt })),
   }));
   const swaps = SEED_SWAPS_RAW.map(([label, members]) => ({ id: uid(), label, members }));
-  return { items, recipes, swaps, extras: [], checked: {} };
+  return { items, recipes, swaps, extras: [], checked: {}, trip: [] };
 }
 
 /* --------------------------- makeability engine --------------------------- */
@@ -454,6 +454,27 @@ select.sel:focus{outline:none;border-color:var(--pine)}
 .t-out{background:var(--clay-bg);color:var(--clay)} .t-low{background:var(--amber-bg);color:var(--amber)}
 .t-add{background:#0000000c;color:var(--ink-soft)}
 
+/* shopping: suggestion + source zones */
+.shop-add{display:flex;gap:8px;margin:4px 0 22px}
+.shop-add input{flex:1;font:inherit;font-size:14.5px;padding:10px 12px;border-radius:11px;
+  border:1px solid var(--line);background:var(--card);color:var(--ink)}
+.shop-add input:focus{outline:none;border-color:var(--pine)}
+.suggest{background:var(--fresh-bg);border:1px solid var(--fresh-line);border-radius:13px;padding:6px;margin-bottom:8px}
+.suggest-row{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:9px}
+.suggest-row+.suggest-row{border-top:1px solid var(--fresh-line)}
+.suggest-row .nm{font-weight:600;font-size:15px}
+.suggest-row .unlocks{font-size:12px;color:var(--fresh);margin-top:1px}
+.suggest-row .unlocks .needs{color:var(--amber)}
+.suggest-main{flex:1;min-width:0}
+.src-row{display:flex;align-items:center;gap:11px;padding:9px 12px;border:1px solid var(--line-soft);
+  border-radius:10px;background:var(--card);margin-bottom:6px}
+.src-row .nm{font-weight:600;font-size:14.5px;flex:1}
+.src-toggle{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:0;font:inherit;
+  cursor:pointer;padding:10px 4px 8px;color:var(--ink)}
+.src-toggle .ct{font-family:'Fraunces',serif;font-size:17px;font-weight:600}
+.src-toggle .cn{font-size:12px;color:var(--sage);background:#0000000a;padding:1px 8px;border-radius:999px}
+.src-toggle .ln{flex:1;height:1px;background:var(--line);margin:0 4px}
+
 /* modal */
 .scrim{position:fixed;inset:0;background:#23291fbb;z-index:60;display:flex;align-items:flex-end;
   justify-content:center;padding:0;animation:fade .15s ease}
@@ -693,7 +714,7 @@ function PantryView({ items, setStock, onEdit, onAdd, onDelete }) {
         <div className="toolbar">
           <div className="searchbox">
             <Search size={17} />
-            <input autoFocus placeholder="Search the pantry…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <input placeholder="Search the pantry…" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
           <select className="sel" value={cat} onChange={(e) => setCat(e.target.value)}>
             <option value="">All categories</option>
@@ -837,26 +858,62 @@ function RecipesView({ engine, swaps, items, onAddRecipe, onEditRecipe, onDelete
 }
 
 /* ------------------------------- SHOPPING --------------------------------- */
-function ShoppingView({ items, extras, checked, engine, setStock, toggleCheck, clearChecked,
-  addExtra, removeExtra, addLowToList }) {
+function ShoppingView({ items, trip, engine, addToTrip, removeFromTrip, toggleTripDone,
+  clearTripDone }) {
   const [groupBy, setGroupBy] = useState("store");
+  const [srcOpen, setSrcOpen] = useState(false);
+  const [draft, setDraft] = useState("");
 
-  // build the list: out + low items + manual extras
-  const rows = [];
-  items.forEach((it) => {
-    if (it.stock === "out") rows.push({ key: "i:" + it.id, name: it.name, store: it.store, category: it.category, tag: "out", itemId: it.id });
-    else if (it.stock === "low") rows.push({ key: "i:" + it.id, name: it.name, store: it.store, category: it.category, tag: "low", itemId: it.id });
+  // names already on the trip list (so we don't suggest them twice)
+  const onTrip = new Set(trip.map((t) => norm(t.name)));
+
+  // ---- Zone B: "Worth a trip" — out items that unlock a recipe ≤2 away ----
+  // walk recipes that are 1 or 2 required-ingredients short; for each missing
+  // item, record which recipes it helps and whether that recipe needs >1 thing.
+  const unlockMap = new Map(); // norm(name) -> { name, store, category, recipes:[{name, needs}] }
+  engine.analyzed.forEach((r) => {
+    if (r.status !== "short_one" && r.status !== "shop") return;
+    if (r.reqMissing.length > 2) return; // only ≤2 away
+    const needs = r.reqMissing.length; // 1 or 2
+    r.reqMissing.forEach((l) => {
+      const key = norm(l.name);
+      const it = items.find((i) => norm(i.name) === key);
+      const entry = unlockMap.get(key) || {
+        name: l.name, store: it?.store || "", category: it?.category || "", recipes: [],
+      };
+      entry.recipes.push({ name: r.name, needs });
+      unlockMap.set(key, entry);
+    });
   });
-  extras.forEach((e) => rows.push({ key: "x:" + e.id, name: e.name, store: e.store || "", category: e.category || "", tag: "add", extraId: e.id }));
+  const suggestions = [...unlockMap.values()]
+    .filter((s) => !onTrip.has(norm(s.name)))
+    .sort((a, b) => a.name.localeCompare(b.name));
 
+  // ---- Zone C: "Also out" — every other out item not already suggested/on trip ----
+  const alsoOut = items
+    .filter((i) => i.stock === "out")
+    .filter((i) => !onTrip.has(norm(i.name)) && !unlockMap.has(norm(i.name)))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  // ---- Zone A: the trip list itself, grouped like before ----
   const buckets = {};
-  rows.forEach((r) => {
-    const k = (groupBy === "store" ? r.store : r.category) || "Anywhere";
-    (buckets[k] = buckets[k] || []).push(r);
+  trip.forEach((t) => {
+    const k = (groupBy === "store" ? t.store : t.category) || "Anywhere";
+    (buckets[k] = buckets[k] || []).push(t);
   });
+  Object.values(buckets).forEach((list) => list.sort((a, b) => a.name.localeCompare(b.name)));
   const keys = Object.keys(buckets).sort();
-  const doneCount = rows.filter((r) => checked[r.key]).length;
-  const lowCount = items.filter((i) => i.stock === "low").length;
+  const doneCount = trip.filter((t) => t.done).length;
+
+  const addDraft = () => {
+    const v = draft.trim();
+    if (!v) return;
+    if (!onTrip.has(norm(v))) {
+      const it = items.find((i) => norm(i.name) === norm(v));
+      addToTrip({ name: v, store: it?.store || "", category: it?.category || "" });
+    }
+    setDraft("");
+  };
 
   return (
     <div className="page">
@@ -868,43 +925,94 @@ function ShoppingView({ items, extras, checked, engine, setStock, toggleCheck, c
               {groupBy === "store" ? <Store size={14} /> : <Layers size={14} />}
               By {groupBy}
             </button>
-            {doneCount > 0 && <button className="btn sm" onClick={clearChecked}><RotateCcw size={14} /> Clear done</button>}
+            {doneCount > 0 && <button className="btn sm" onClick={clearTripDone}><RotateCcw size={14} /> Clear checked</button>}
           </div>
         </div>
         <p className="lede">
-          {rows.length} to buy{doneCount ? ` · ${doneCount} in cart` : ""}. Everything you're out of lands here automatically.
-          {lowCount > 0 && <> <button className="btn sm" style={{ marginLeft: 6, verticalAlign: "middle" }} onClick={addLowToList}><Plus size={13} /> Top up {lowCount} low</button></>}
+          {trip.length
+            ? `${trip.length} on your list${doneCount ? ` · ${doneCount} checked off` : ""}.`
+            : "Your list is empty — add what you're out of below, or build it from what's worth a trip."}
         </p>
 
-        {rows.length === 0 ? (
-          <div className="empty card"><ShoppingCart size={30} /><div className="e-t">Cart's empty — kitchen's full</div>
-            <div className="muted">Mark something Out in the Pantry and it'll show up here.</div></div>
+        {/* manual add */}
+        <div className="shop-add">
+          <input
+            placeholder="Add anything to the list…"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addDraft())}
+          />
+          <button className="btn primary" onClick={addDraft} style={{ flex: "none" }}><Plus size={16} /> Add</button>
+        </div>
+
+        {/* ZONE A — the trip list */}
+        {trip.length === 0 ? (
+          <div className="empty card" style={{ marginBottom: 26 }}>
+            <ShoppingCart size={30} /><div className="e-t">Nothing on the list yet</div>
+            <div className="muted">Tap items from “Worth a trip” or “Also out” below to start building it.</div>
+          </div>
         ) : keys.map((k) => (
           <div className="shop-store" key={k}>
             <h3>{groupBy === "store" ? <Store size={17} color="var(--sage)" /> : <Layers size={17} color="var(--sage)" />}{k}</h3>
-            {buckets[k].map((r) => {
-              const on = !!checked[r.key];
-              return (
-                <div className={`shop-row ${on ? "done" : ""}`} key={r.key}>
-                  <button className={`check ${on ? "on" : ""}`} onClick={() => toggleCheck(r.key)} aria-label="Got it">
-                    {on && <Check size={15} />}
-                  </button>
-                  <span className="nm">{r.name}</span>
-                  <span className={`shop-tag ${r.tag === "out" ? "t-out" : r.tag === "low" ? "t-low" : "t-add"}`}>
-                    {r.tag === "out" ? "Out" : r.tag === "low" ? "Low" : "Added"}
-                  </span>
-                  {r.itemId ? (
-                    <button className="btn sm" onClick={() => { setStock(r.itemId, "in"); }} title="Mark restocked">
-                      <Check size={13} /> Restocked
-                    </button>
-                  ) : (
-                    <button className="icon-btn" onClick={() => removeExtra(r.extraId)}><X size={15} /></button>
-                  )}
-                </div>
-              );
-            })}
+            {buckets[k].map((t) => (
+              <div className={`shop-row ${t.done ? "done" : ""}`} key={t.id}>
+                <button className={`check ${t.done ? "on" : ""}`} onClick={() => toggleTripDone(t.id)} aria-label="Got it">
+                  {t.done && <Check size={15} />}
+                </button>
+                <span className="nm">{t.name}</span>
+                <button className="icon-btn" onClick={() => removeFromTrip(t.id)} aria-label="Remove"><X size={15} /></button>
+              </div>
+            ))}
           </div>
         ))}
+
+        {/* ZONE B — worth a trip */}
+        {suggestions.length > 0 && (
+          <>
+            <div className="eyebrow">Worth a trip</div>
+            <div className="suggest">
+              {suggestions.map((s) => (
+                <div className="suggest-row" key={norm(s.name)}>
+                  <div className="suggest-main">
+                    <div className="nm">{s.name}</div>
+                    <div className="unlocks">
+                      {s.recipes.map((rc, i) => (
+                        <span key={rc.name}>
+                          {i > 0 && ", "}
+                          {rc.name}{rc.needs > 1 && <span className="needs"> (needs 1 more)</span>}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <button className="btn sm" onClick={() => addToTrip({ name: s.name, store: s.store, category: s.category })}>
+                    <Plus size={14} /> Add
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* ZONE C — also out (collapsed) */}
+        {alsoOut.length > 0 && (
+          <>
+            <button className="src-toggle" onClick={() => setSrcOpen((v) => !v)}>
+              {srcOpen ? <ChevronDown size={17} color="var(--sage)" /> : <ChevronRight size={17} color="var(--sage)" />}
+              <span className="ct">Also out</span>
+              <span className="cn">{alsoOut.length}</span>
+              <span className="ln" />
+            </button>
+            {srcOpen && alsoOut.map((it) => (
+              <div className="src-row" key={it.id}>
+                <span className={`dot ${stockDotClass("out")}`} />
+                <span className="nm">{it.name}</span>
+                <button className="btn sm" onClick={() => addToTrip({ name: it.name, store: it.store, category: it.category })}>
+                  <Plus size={14} /> Add
+                </button>
+              </div>
+            ))}
+          </>
+        )}
       </div>
     </div>
   );
@@ -1318,33 +1426,29 @@ export default function App() {
     patch({ items: data.items.map((i) => (need.has(norm(i.name)) ? { ...i, stock: drop[i.stock] } : i)) });
   };
 
-  /* ---- shopping ops ---- */
-  const toggleCheck = (key) => patch({ checked: { ...data.checked, [key]: !data.checked[key] } });
-  const clearChecked = () => {
-    const c = { ...data.checked };
-    Object.keys(c).forEach((k) => { if (c[k]) delete c[k]; });
-    patch({ checked: c });
+  /* ---- shopping (trip list) ops ---- */
+  const addToTrip = ({ name, store, category }) => {
+    const cur = data.trip || [];
+    if (cur.some((t) => norm(t.name) === norm(name))) return; // no duplicates
+    patch({ trip: [...cur, { id: uid(), name, store: store || "", category: category || "", done: false }] });
   };
-  const addExtra = (name, store, category) =>
-    patch({ extras: [...data.extras, { id: uid(), name, store: store || "", category: category || "" }] });
-  const removeExtra = (id) => patch({ extras: data.extras.filter((e) => e.id !== id) });
-  const addLowToList = () => {
-    const have = new Set(data.extras.map((e) => norm(e.name)));
-    const add = data.items.filter((i) => i.stock === "low" && !have.has(norm(i.name)))
-      .map((i) => ({ id: uid(), name: i.name, store: i.store, category: i.category }));
-    patch({ extras: [...data.extras, ...add] });
-  };
-  // add a recipe's missing required items to the list
+  const removeFromTrip = (id) => patch({ trip: (data.trip || []).filter((t) => t.id !== id) });
+  const toggleTripDone = (id) =>
+    patch({ trip: (data.trip || []).map((t) => (t.id === id ? { ...t, done: !t.done } : t)) });
+  const clearTripDone = () => patch({ trip: (data.trip || []).filter((t) => !t.done) });
+
+  // add a recipe's missing required items straight onto the trip list
   const addMissing = (r) => {
-    const have = new Set(data.extras.map((e) => norm(e.name)));
+    const cur = data.trip || [];
+    const have = new Set(cur.map((t) => norm(t.name)));
     const add = [];
     r.reqMissing.forEach((l) => {
       if (have.has(norm(l.name))) return;
       const it = data.items.find((i) => norm(i.name) === norm(l.name));
-      add.push({ id: uid(), name: l.name, store: it?.store || "", category: it?.category || "" });
+      add.push({ id: uid(), name: l.name, store: it?.store || "", category: it?.category || "", done: false });
       have.add(norm(l.name));
     });
-    if (add.length) { patch({ extras: [...data.extras, ...add] }); setView("shopping"); }
+    if (add.length) { patch({ trip: [...cur, ...add] }); setView("shopping"); }
   };
 
   const resetAll = () => {
@@ -1407,9 +1511,9 @@ export default function App() {
             {...ticketHandlers} />
         )}
         {view === "shopping" && (
-          <ShoppingView items={data.items} extras={data.extras} checked={data.checked} engine={engine}
-            setStock={setStock} toggleCheck={toggleCheck} clearChecked={clearChecked}
-            addExtra={addExtra} removeExtra={removeExtra} addLowToList={addLowToList} />
+          <ShoppingView items={data.items} trip={data.trip || []} engine={engine}
+            addToTrip={addToTrip} removeFromTrip={removeFromTrip}
+            toggleTripDone={toggleTripDone} clearTripDone={clearTripDone} />
         )}
 
         <div className="wrap">
