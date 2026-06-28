@@ -693,7 +693,7 @@ function PantryView({ items, setStock, onEdit, onAdd, onDelete }) {
         <div className="toolbar">
           <div className="searchbox">
             <Search size={17} />
-            <input placeholder="Search the pantry…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <input autoFocus placeholder="Search the pantry…" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
           <select className="sel" value={cat} onChange={(e) => setCat(e.target.value)}>
             <option value="">All categories</option>
